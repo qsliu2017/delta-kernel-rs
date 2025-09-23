@@ -412,6 +412,51 @@ fn row_indexes_from_dv_impl(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn dv_has_vector(
+    dv_info: &DvInfo,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<bool> {
+    Ok(dv_info.has_vector()).into_extern_result(&engine.as_ref())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn dv_uuid(
+    dv_info: &DvInfo,
+    engine: Handle<SharedExternEngine>,
+    allocate_fn: AllocateStringFn,
+) -> ExternResult<NullableCvoid> {
+    let v = dv_info.dv_unique_id();
+    let opt = v
+        .as_ref()
+        .and_then(|s| allocate_fn(kernel_string_slice!(s)).as_ref().cloned());
+    Ok(opt).into_extern_result(&engine.as_ref())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn dv_offset(
+    dv_info: &DvInfo,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<u64> {
+    Ok(dv_info.dv_offset().unwrap_or(0)).into_extern_result(&engine.as_ref())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn dv_size_in_bytes(
+    dv_info: &DvInfo,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<u64> {
+    Ok(dv_info.dv_size_in_bytes().unwrap_or(0)).into_extern_result(&engine.as_ref())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn dv_cardinality(
+    dv_info: &DvInfo,
+    engine: Handle<SharedExternEngine>,
+) -> ExternResult<u64> {
+    Ok(dv_info.dv_cardinality().unwrap_or(0)).into_extern_result(&engine.as_ref())
+}
+
 // Wrapper function that gets called by the kernel, transforms the arguments to make the ffi-able,
 // and then calls the ffi specified callback
 fn rust_callback(

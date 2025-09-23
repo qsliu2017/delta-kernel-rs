@@ -89,6 +89,25 @@ impl DvInfo {
             })
             .transpose()
     }
+
+    /// Expose descriptor derived fields for FFI callers
+    pub fn dv_unique_id(&self) -> Option<String> {
+        self.deletion_vector.as_ref().map(|d| d.unique_id())
+    }
+
+    pub fn dv_offset(&self) -> Option<u64> {
+        self.deletion_vector
+            .as_ref()
+            .and_then(|d| d.offset.map(|v| v as u64))
+    }
+
+    pub fn dv_size_in_bytes(&self) -> Option<u64> {
+        self.deletion_vector.as_ref().map(|d| d.size_in_bytes as u64)
+    }
+
+    pub fn dv_cardinality(&self) -> Option<u64> {
+        self.deletion_vector.as_ref().map(|d| d.cardinality as u64)
+    }
 }
 
 /// utility function for applying a transform expression to convert data from physical to logical
