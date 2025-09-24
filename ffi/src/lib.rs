@@ -44,6 +44,23 @@ pub mod ffi_tracing;
 pub mod scan;
 pub mod schema;
 
+/// File metadata structure for simplified add_file APIs
+#[repr(C)]
+pub struct FileMetadata {
+    pub path: *const c_char,
+    pub size_bytes: u64,
+    pub modification_time_ms: u64,
+    pub num_records: u64,
+    pub partition_values_json: *const c_char,
+    pub stats_json: *const c_char,
+    pub data_change: bool,
+    pub dv_storage_type: *const c_char,
+    pub dv_path_or_inline: *const c_char,
+    pub dv_offset: u64,
+    pub dv_size_bytes: u64,
+    pub dv_cardinality: u64,
+}
+
 #[cfg(test)]
 mod ffi_test_utils;
 #[cfg(feature = "test-ffi")]

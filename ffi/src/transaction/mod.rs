@@ -1,5 +1,6 @@
 //! This module holds functionality for managing transactions.
 mod write_context;
+mod simple;
 
 use crate::error::{ExternResult, IntoExternResult};
 use crate::handle::Handle;
@@ -171,7 +172,7 @@ mod tests {
             .expect("txnId should be present in commitInfo");
     }
 
-    fn create_arrow_ffi_from_json(
+    pub fn create_arrow_ffi_from_json(
         schema: ArrowSchema,
         json_string: &str,
     ) -> Result<ArrowFFIData, Box<dyn std::error::Error>> {
