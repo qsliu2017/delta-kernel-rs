@@ -19,3 +19,9 @@ ffi/examples/read-table/build
 /build
 /kernel/target
 /target
+
+# CMake/clangd
+compile_commands.json
+
+build/
+.cache/
