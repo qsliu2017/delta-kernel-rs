@@ -51,8 +51,22 @@ pub(crate) static ADD_FILES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
         DataType::struct_type(vec![StructField::nullable("numRecords", DataType::LONG)]),
     );
 
+    let deletion_vector = StructField::nullable(
+        "deletionVector",
+        DataType::struct_type(vec![
+            StructField::not_null("storageType", DataType::STRING),
+            StructField::not_null("pathOrInlineDv", DataType::STRING),
+            StructField::nullable("offset", DataType::INTEGER),
+            StructField::not_null("sizeInBytes", DataType::INTEGER),
+            StructField::not_null("cardinality", DataType::LONG),
+        ]),
+    );
+
     Arc::new(StructType::new(
-        mandatory_add_file_schema().fields().cloned().chain([stats]),
+        mandatory_add_file_schema()
+            .fields()
+            .cloned()
+            .chain([stats, deletion_vector]),
     ))
 });
 
@@ -85,6 +99,23 @@ fn with_stats_col(schema: &SchemaRef) -> SchemaRef {
         .fields()
         .cloned()
         .chain([StructField::nullable("stats", DataType::STRING)]);
+    Arc::new(StructType::new(fields))
+}
+
+/// Extend a schema with a deletion vector column and return a new SchemaRef.
+///
+/// This method can be useful to extend either an Add or Remove action schema.
+fn with_deletion_vector_col(schema: &SchemaRef) -> SchemaRef {
+    let fields = schema.fields().cloned().chain([StructField::nullable(
+        "deletionVector",
+        DataType::struct_type(vec![
+            StructField::not_null("storageType", DataType::STRING),
+            StructField::not_null("pathOrInlineDv", DataType::STRING),
+            StructField::nullable("offset", DataType::INTEGER),
+            StructField::not_null("sizeInBytes", DataType::INTEGER),
+            StructField::not_null("cardinality", DataType::LONG),
+        ]),
+    )]);
     Arc::new(StructType::new(fields))
 }
 
@@ -213,7 +244,9 @@ impl Transaction {
                 engine,
                 self.add_files_metadata.iter().map(|a| Ok(a.deref())),
                 add_files_schema().clone(),
-                as_log_add_schema(with_stats_col(mandatory_add_file_schema())),
+                as_log_add_schema(with_stats_col(&with_deletion_vector_col(
+                    mandatory_add_file_schema(),
+                ))),
             )
         };
 
@@ -397,7 +430,7 @@ impl Transaction {
             extended_add_files_metadata,
             with_row_tracking_cols(add_files_schema()),
             as_log_add_schema(with_row_tracking_cols(&with_stats_col(
-                mandatory_add_file_schema(),
+                &with_deletion_vector_col(mandatory_add_file_schema()),
             ))),
         );
 
@@ -493,6 +526,16 @@ mod tests {
             StructField::nullable(
                 "stats",
                 DataType::struct_type(vec![StructField::nullable("numRecords", DataType::LONG)]),
+            ),
+            StructField::nullable(
+                "deletionVector",
+                DataType::struct_type(vec![
+                    StructField::not_null("storageType", DataType::STRING),
+                    StructField::not_null("pathOrInlineDv", DataType::STRING),
+                    StructField::nullable("offset", DataType::INTEGER),
+                    StructField::not_null("sizeInBytes", DataType::INTEGER),
+                    StructField::not_null("cardinality", DataType::LONG),
+                ]),
             ),
         ]);
         assert_eq!(*schema, expected.into());

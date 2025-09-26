@@ -4,12 +4,14 @@
 //! Arrow knowledge, making Delta Kernel more accessible to C/C++ consumers.
 
 use std::os::raw::c_char;
+use std::ptr::NonNull;
 use std::sync::Arc;
 
 use delta_kernel::arrow::array::{
-    BooleanArray, Int64Array, MapBuilder, MapFieldNames, RecordBatch, StringArray, StringBuilder,
-    StructArray,
+    ArrayRef, BooleanArray, Int32Array, Int64Array, MapBuilder, MapFieldNames, RecordBatch,
+    StringArray, StringBuilder, StructArray,
 };
+use delta_kernel::arrow::buffer::{BooleanBuffer, NullBuffer};
 use delta_kernel::arrow::datatypes::{DataType, Field};
 use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 use delta_kernel::transaction::add_files_schema;
@@ -22,14 +24,15 @@ use crate::{handle::Handle, transaction::ExclusiveTransaction};
 
 #[repr(C)]
 pub struct AddFileActionMetadata {
-    path: *const c_char,
+    /// Safety: non null. A null-terminated string.
+    path: NonNull<c_char>,
     // partitions: HashMap<String, String>
     size: u64,
     modification_time: i64,
     data_change: bool,
     // stats: { num_records: i64 }
-    /// Nullable.
-    deletion_vector: *const DeletionVectorDescriptor,
+    /// Safety: nullable.
+    deletion_vector: Option<NonNull<DeletionVectorDescriptor>>,
 }
 
 /// Deletion vector descriptor. The same as [`DeletionVectorDescriptor`] in kernel.
@@ -39,12 +42,49 @@ pub struct AddFileActionMetadata {
 pub struct DeletionVectorDescriptor {
     /// A single character to indicate how to access the DV. Legal options are: ['u', 'i', 'p'].
     storage_type: c_char,
-    /// Not null. A null-terminated string.
-    path_or_inline_dv: *const c_char,
-    /// Nullable. If null, the offset is 0.
-    offset: *const i32,
+    /// Safety: non null. A null-terminated string.
+    path_or_inline_dv: NonNull<c_char>,
+    /// Safety: nullable. If null, the offset is 0.
+    offset: Option<NonNull<i32>>,
     size_in_bytes: i32,
     cardinality: i64,
+}
+
+/// Metadata for a single `remove` action exposed via the simple C FFI.
+///
+/// This mirrors a subset of the Delta Lake `remove` action schema in a
+/// field-oriented layout suitable for FFI callers. Optional values are
+/// represented as nullable pointers.
+#[repr(C)]
+pub struct RemoveFileActionMetadata {
+    /// Safety: non null. A null-terminated string.
+    path: NonNull<c_char>,
+    /// Milliseconds since epoch.
+    ///
+    /// Safety: nullable.
+    deletion_timestamp: Option<NonNull<i64>>,
+    /// Required.
+    data_change: bool,
+    /// Safety: nullable. When null, treated as false.
+    extended_file_metadata: Option<NonNull<bool>>,
+    /// Size in bytes.
+    ///
+    /// Safety: nullable.
+    size: Option<NonNull<i64>>,
+    /// Safety: nullable.
+    deletion_vector: Option<NonNull<DeletionVectorDescriptor>>,
+    /// Safety: nullable.
+    base_row_id: Option<NonNull<i64>>,
+    /// Safety: nullable.
+    default_row_commit_version: Option<NonNull<i64>>,
+}
+
+unsafe fn cloned_c_str(ptr: *const c_char) -> DeltaResult<String> {
+    let c_str = std::ffi::CStr::from_ptr(ptr);
+    Ok(c_str
+        .to_str()
+        .map_err(|_| Error::generic("Failed to convert path to string"))?
+        .to_owned())
 }
 
 /// Add a single file to the transaction with simple field-based parameters.
@@ -76,13 +116,9 @@ impl AddFileActionMetadata {
     /// [`add_files_schema`].
     ///
     /// [`add_files_schema`]: delta_kernel::transaction::add_files_schema
-    fn as_record_batch(&self) -> DeltaResult<Box<ArrowEngineData>> {
+    unsafe fn as_record_batch(&self) -> DeltaResult<Box<ArrowEngineData>> {
         // copy C string to Rust string
-        let path = unsafe { std::ffi::CStr::from_ptr(self.path) };
-        let path = path
-            .to_str()
-            .map_err(|_| Error::generic("Failed to convert path to string"))?
-            .to_owned();
+        let path = unsafe { cloned_c_str(self.path.as_ptr())? };
         let path = Arc::new(StringArray::from(vec![path]));
 
         let key_builder = StringBuilder::new();
@@ -111,6 +147,42 @@ impl AddFileActionMetadata {
             1,
         )?);
 
+        let (arrays, nulls): (Vec<ArrayRef>, Option<NullBuffer>) =
+            if let Some(desc) = self.deletion_vector {
+                let dv = unsafe { desc.read() };
+                (
+                    vec![
+                        Arc::new(StringArray::from(vec![dv.storage_type.to_string()])),
+                        Arc::new(StringArray::from(vec![unsafe {
+                            cloned_c_str(dv.path_or_inline_dv.as_ptr())?
+                        }])),
+                        Arc::new(Int32Array::from(vec![dv
+                            .offset
+                            .map(|v| unsafe { v.read() })
+                            .unwrap_or(0)])),
+                        Arc::new(Int32Array::from(vec![dv.size_in_bytes])),
+                        Arc::new(Int64Array::from(vec![dv.cardinality])),
+                    ],
+                    None,
+                )
+            } else {
+                (vec![], Some(NullBuffer::new(BooleanBuffer::new_unset(1))))
+            };
+
+        let deletion_vector = Arc::new(StructArray::try_new_with_length(
+            vec![
+                Field::new("storageType", DataType::Utf8, true),
+                Field::new("pathOrInlineDv", DataType::Utf8, true),
+                Field::new("offset", DataType::Int32, true),
+                Field::new("sizeInBytes", DataType::Int32, true),
+                Field::new("cardinality", DataType::Int64, true),
+            ]
+            .into(),
+            arrays,
+            nulls,
+            1,
+        )?);
+
         Ok(Box::new(ArrowEngineData::new(RecordBatch::try_new(
             Arc::new(add_files_schema().as_ref().try_into_arrow()?),
             vec![
@@ -120,6 +192,7 @@ impl AddFileActionMetadata {
                 modification_time,
                 data_change,
                 stats,
+                deletion_vector,
             ],
         )?)))
     }
