@@ -6,8 +6,8 @@ use std::sync::{Arc, LazyLock};
 use url::Url;
 
 use crate::actions::{
-    as_log_add_schema, get_log_commit_info_schema, get_log_domain_metadata_schema,
-    get_log_txn_schema, CommitInfo, DomainMetadata, SetTransaction,
+    as_log_add_schema, as_log_remove_schema, get_log_commit_info_schema,
+    get_log_domain_metadata_schema, get_log_txn_schema, CommitInfo, DomainMetadata, SetTransaction,
 };
 use crate::error::Error;
 use crate::expressions::{ArrayData, Transform, UnaryExpressionOp::ToJson};
@@ -87,6 +87,37 @@ pub fn add_files_schema() -> &'static SchemaRef {
     &ADD_FILES_SCHEMA
 }
 
+pub(crate) static MANDATORY_REMOVE_FILES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
+    Arc::new(StructType::new(vec![
+        StructField::not_null("path", DataType::STRING),
+        StructField::nullable("deletionTimestamp", DataType::LONG),
+        StructField::not_null("dataChange", DataType::BOOLEAN),
+        StructField::nullable("extendedFileMetadata", DataType::BOOLEAN),
+        StructField::nullable(
+            "partitionValues",
+            MapType::new(DataType::STRING, DataType::STRING, true),
+        ),
+        StructField::nullable("size", DataType::LONG),
+    ]))
+});
+
+pub(crate) fn mandatory_remove_files_schema() -> &'static SchemaRef {
+    &MANDATORY_REMOVE_FILES_SCHEMA
+}
+
+pub(crate) static REMOVE_FILES_SCHEMA: LazyLock<SchemaRef> =
+    LazyLock::new(|| with_deletion_vector_col(mandatory_remove_files_schema()));
+
+/// This function specifies the schema for the remove_files metadata.
+/// Concretely, it is the expected schema for engine data passed to [`remove_files`].
+///
+/// Each row represents metadata about a file to be removed from the table.
+///
+/// [`remove_files`]: crate::transaction::Transaction::remove_files
+pub fn remove_files_schema() -> &'static SchemaRef {
+    &REMOVE_FILES_SCHEMA
+}
+
 // NOTE: The following two methods are a workaround for the fact that we do not have a proper SchemaBuilder yet.
 // See https://github.com/delta-io/delta-kernel-rs/issues/1284
 /// Extend a schema with a statistics column and return a new SchemaRef.
@@ -149,6 +180,7 @@ pub struct Transaction {
     operation: Option<String>,
     engine_info: Option<String>,
     add_files_metadata: Vec<Box<dyn EngineData>>,
+    remove_files_metadata: Vec<Box<dyn EngineData>>,
     // NB: hashmap would require either duplicating the appid or splitting SetTransaction
     // key/payload. HashSet requires Borrow<&str> with matching Eq, Ord, and Hash. Plus,
     // HashSet::insert drops the to-be-inserted value without returning the existing one, which
@@ -192,6 +224,7 @@ impl Transaction {
             operation: None,
             engine_info: None,
             add_files_metadata: vec![],
+            remove_files_metadata: vec![],
             set_transactions: vec![],
             commit_timestamp,
         })
@@ -250,12 +283,20 @@ impl Transaction {
             )
         };
 
+        let remove_actions = self.generate_file_actions(
+            engine,
+            self.remove_files_metadata.iter().map(|a| Ok(a.deref())),
+            remove_files_schema().clone(),
+            as_log_remove_schema(remove_files_schema().clone()),
+        );
+
         // Step 4: Commit the actions as a JSON file to the Delta log
         let commit_path =
             ParsedLogPath::new_commit(self.read_snapshot.table_root(), commit_version)?;
         let actions = iter::once(commit_info_action)
             .chain(set_transaction_actions)
-            .chain(add_actions);
+            .chain(add_actions)
+            .chain(remove_actions);
 
         let json_handler = engine.json_handler();
         match json_handler.write_json_file(&commit_path.location, Box::new(actions), false) {
@@ -340,6 +381,10 @@ impl Transaction {
     /// The expected schema for `add_metadata` is given by [`add_files_schema`].
     pub fn add_files(&mut self, add_metadata: Box<dyn EngineData>) {
         self.add_files_metadata.push(add_metadata);
+    }
+
+    pub fn remove_files(&mut self, remove_metadata: Box<dyn EngineData>) {
+        self.remove_files_metadata.push(remove_metadata);
     }
 
     /// Convert file metadata provided by the engine into protocol-compliant add actions.
@@ -439,6 +484,31 @@ impl Transaction {
             add_actions.chain(iter::once(domain_metadata_action)),
         ))
     }
+
+    fn generate_file_actions<'a, I, T>(
+        &'a self,
+        engine: &dyn Engine,
+        file_metadata: I,
+        input_schema: SchemaRef,
+        output_schema: SchemaRef,
+    ) -> EngineDataResultIterator<'a>
+    where
+        I: Iterator<Item = DeltaResult<T>> + Send + 'a,
+        T: Deref<Target = dyn EngineData> + Send + 'a,
+    {
+        let evaluation_handler = engine.evaluation_handler();
+
+        Box::new(file_metadata.map(move |file_metadata_batch| {
+            let file_action_expr =
+                Expression::struct_from([Expression::transform(Transform::new_top_level())]);
+            let file_action_eval = evaluation_handler.new_expression_evaluator(
+                input_schema.clone(),
+                Arc::new(file_action_expr),
+                output_schema.clone().into(),
+            );
+            file_action_eval.evaluate(file_metadata_batch?.deref())
+        }))
+    }
 }
 
 /// WriteContext is data derived from a [`Transaction`] that can be provided to writers in order to
@@ -527,6 +597,33 @@ mod tests {
                 "stats",
                 DataType::struct_type(vec![StructField::nullable("numRecords", DataType::LONG)]),
             ),
+            StructField::nullable(
+                "deletionVector",
+                DataType::struct_type(vec![
+                    StructField::not_null("storageType", DataType::STRING),
+                    StructField::not_null("pathOrInlineDv", DataType::STRING),
+                    StructField::nullable("offset", DataType::INTEGER),
+                    StructField::not_null("sizeInBytes", DataType::INTEGER),
+                    StructField::not_null("cardinality", DataType::LONG),
+                ]),
+            ),
+        ]);
+        assert_eq!(*schema, expected.into());
+    }
+
+    #[test]
+    fn test_remove_files_schema() {
+        let schema = remove_files_schema();
+        let expected = StructType::new(vec![
+            StructField::not_null("path", DataType::STRING),
+            StructField::nullable("deletionTimestamp", DataType::LONG),
+            StructField::not_null("dataChange", DataType::BOOLEAN),
+            StructField::nullable("extendedFileMetadata", DataType::BOOLEAN),
+            StructField::nullable(
+                "partitionValues",
+                MapType::new(DataType::STRING, DataType::STRING, true),
+            ),
+            StructField::nullable("size", DataType::LONG),
             StructField::nullable(
                 "deletionVector",
                 DataType::struct_type(vec![

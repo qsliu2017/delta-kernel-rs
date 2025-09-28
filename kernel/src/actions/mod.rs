@@ -140,6 +140,13 @@ pub(crate) fn as_log_add_schema(schema: SchemaRef) -> SchemaRef {
     Arc::new(StructType::new([StructField::nullable(ADD_NAME, schema)]))
 }
 
+pub(crate) fn as_log_remove_schema(schema: SchemaRef) -> SchemaRef {
+    Arc::new(StructType::new([StructField::nullable(
+        REMOVE_NAME,
+        schema,
+    )]))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, ToSchema)]
 #[cfg_attr(
     any(test, feature = "internal-api"),

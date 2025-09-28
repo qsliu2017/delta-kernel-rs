@@ -513,4 +513,149 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_remove_files_simple() -> Result<(), Box<dyn std::error::Error>> {
+        use super::simple::{
+            remove_file_simple, DeletionVectorDescriptor, RemoveFileActionMetadata,
+        };
+        use std::ffi::CString;
+        use std::os::raw::c_char;
+        use std::ptr::NonNull;
+
+        let schema = Arc::new(StructType::new(vec![
+            StructField::nullable("number", DataType::INTEGER),
+            StructField::nullable("string", DataType::STRING),
+        ]));
+
+        // Create a temporary local directory for use during this test
+        let tmp_test_dir = tempdir()?;
+        let tmp_dir_local_url = Url::from_directory_path(tmp_test_dir.path()).unwrap();
+
+        // TODO: test with partitions
+        let partition_columns = vec![];
+
+        for (table_url, _engine, store, _table_name) in setup_test_tables(
+            schema,
+            &partition_columns,
+            Some(&tmp_dir_local_url),
+            "test_table_simple",
+        )
+        .await?
+        {
+            let table_path = table_url.to_file_path().unwrap();
+            let table_path_str = table_path.to_str().unwrap();
+            let engine = get_default_engine(table_path_str);
+
+            // Start the transaction
+            let txn = ok_or_panic(unsafe {
+                transaction(kernel_string_slice!(table_path_str), engine.shallow_copy())
+            });
+
+            // Add engine info
+            let engine_info = "default_engine";
+            let engine_info_kernel_string = kernel_string_slice!(engine_info);
+            let txn_with_engine_info = unsafe {
+                ok_or_panic(with_engine_info(
+                    txn,
+                    engine_info_kernel_string,
+                    engine.shallow_copy(),
+                ))
+            };
+
+            // No parquet file writing: use literal path and insert metadata via simple API
+            let file_name = "my_file_simple.parquet";
+
+            // Build simple metadata (with a non-null deletion vector)
+            let c_path = CString::new(file_name).unwrap();
+            let dv_path_or_inline = CString::new("aaaaaaaaaaaaaaaaaaaa").unwrap(); // 20 chars
+                                                                                   // Note: keep locals alive for the duration of the FFI call
+            let mut dv_desc = DeletionVectorDescriptor {
+                storage_type: 'u' as i8 as c_char,
+                path_or_inline_dv: NonNull::new(dv_path_or_inline.as_ptr() as *mut _)
+                    .expect("non-null dv path"),
+                offset: None,
+                size_in_bytes: 36,
+                cardinality: 2,
+            };
+
+            let metadata = RemoveFileActionMetadata {
+                path: NonNull::new(c_path.as_ptr() as *mut _).expect("non-null path"),
+                deletion_timestamp: None,
+                data_change: true,
+                extended_file_metadata: None,
+                size: None,
+                deletion_vector: Some(NonNull::new(&mut dv_desc as *mut _).unwrap()),
+            };
+
+            // Call the simple API to add file
+            let _ = unsafe {
+                ok_or_panic(remove_file_simple(
+                    txn_with_engine_info.shallow_copy(),
+                    engine.shallow_copy(),
+                    &metadata,
+                ))
+            };
+
+            // Commit
+            ok_or_panic(unsafe { commit(txn_with_engine_info, engine.shallow_copy()) });
+
+            // Confirm that our commit is what we expect
+
+            let commit1_url = table_url
+                .join("_delta_log/00000000000000000001.json")
+                .unwrap();
+            let commit1 = store
+                .get(&Path::from_url_path(commit1_url.path()).unwrap())
+                .await?;
+            let mut parsed_commits: Vec<_> = Deserializer::from_slice(&commit1.bytes().await?)
+                .into_iter::<serde_json::Value>()
+                .try_collect()?;
+
+            check_txn_id_exists(&parsed_commits[0]["commitInfo"]);
+
+            // set timestamps to 0, paths and txn_id to known string values for comparison
+            set_json_value(&mut parsed_commits[0], "commitInfo.timestamp", json!(0))?;
+            set_json_value(&mut parsed_commits[0], "commitInfo.txnId", json!(ZERO_UUID))?;
+            set_json_value(&mut parsed_commits[1], "remove.deletionTimestamp", json!(0))?;
+            set_json_value(&mut parsed_commits[1], "remove.size", json!(0))?;
+
+            let expected_commit = vec![
+                json!({
+                    "commitInfo": {
+                        "timestamp": 0,
+                        "engineInfo": "default_engine",
+                        "operation": "UNKNOWN",
+                        "kernelVersion": format!("v{}", env!("CARGO_PKG_VERSION")),
+                        "operationParameters": {},
+                        "txnId": ZERO_UUID
+                    }
+                }),
+                json!({
+                    "remove": {
+                        "path": file_name,
+                        "partitionValues": {},
+                        "size": 0,
+                        "deletionTimestamp": 0,
+                        "dataChange": true,
+                        "extendedFileMetadata": false,
+                        "deletionVector": {
+                            "storageType": "u",
+                            "pathOrInlineDv": "aaaaaaaaaaaaaaaaaaaa",
+                            "offset": 0,
+                            "sizeInBytes": 36,
+                            "cardinality": 2
+                        }
+                    }
+                }),
+            ];
+
+            assert_eq!(parsed_commits, expected_commit);
+
+            // Cleanup
+            unsafe { free_engine(engine) };
+        }
+
+        Ok(())
+    }
 }
