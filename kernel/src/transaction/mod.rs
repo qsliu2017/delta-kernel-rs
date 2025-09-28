@@ -244,7 +244,7 @@ impl Transaction {
                 engine,
                 self.add_files_metadata.iter().map(|a| Ok(a.deref())),
                 add_files_schema().clone(),
-                as_log_add_schema(with_stats_col(&with_deletion_vector_col(
+                as_log_add_schema(with_deletion_vector_col(&with_stats_col(
                     mandatory_add_file_schema(),
                 ))),
             )

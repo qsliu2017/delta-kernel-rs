@@ -104,6 +104,17 @@ impl DataFileMetadata {
             None,
             1,
         )?);
+        let deletion_vector = Arc::new(StructArray::new_null(
+            vec![
+                Field::new("storageType", DataType::Utf8, false),
+                Field::new("pathOrInlineDv", DataType::Utf8, false),
+                Field::new("offset", DataType::Int32, true),
+                Field::new("sizeInBytes", DataType::Int32, false),
+                Field::new("cardinality", DataType::Int64, false),
+            ]
+            .into(),
+            1,
+        ));
 
         Ok(Box::new(ArrowEngineData::new(RecordBatch::try_new(
             Arc::new(add_files_schema().as_ref().try_into_arrow()?),
@@ -114,6 +125,7 @@ impl DataFileMetadata {
                 modification_time,
                 data_change,
                 stats,
+                deletion_vector,
             ],
         )?)))
     }
@@ -518,6 +530,18 @@ mod tests {
         )
         .unwrap();
 
+        let deletion_vector_struct = StructArray::new_null(
+            vec![
+                Field::new("storageType", DataType::Utf8, false),
+                Field::new("pathOrInlineDv", DataType::Utf8, false),
+                Field::new("offset", DataType::Int32, true),
+                Field::new("sizeInBytes", DataType::Int32, false),
+                Field::new("cardinality", DataType::Int64, false),
+            ]
+            .into(),
+            1,
+        );
+
         let expected = RecordBatch::try_new(
             schema,
             vec![
@@ -527,6 +551,7 @@ mod tests {
                 Arc::new(Int64Array::from(vec![last_modified])),
                 Arc::new(BooleanArray::from(vec![data_change])),
                 Arc::new(stats_struct),
+                Arc::new(deletion_vector_struct),
             ],
         )
         .unwrap();

@@ -11,7 +11,6 @@ use delta_kernel::arrow::array::{
     ArrayRef, BooleanArray, Int32Array, Int64Array, MapBuilder, MapFieldNames, RecordBatch,
     StringArray, StringBuilder, StructArray,
 };
-use delta_kernel::arrow::buffer::{BooleanBuffer, NullBuffer};
 use delta_kernel::arrow::datatypes::{DataType, Field};
 use delta_kernel::engine::arrow_conversion::TryIntoArrow;
 use delta_kernel::transaction::add_files_schema;
@@ -25,14 +24,14 @@ use crate::{handle::Handle, transaction::ExclusiveTransaction};
 #[repr(C)]
 pub struct AddFileActionMetadata {
     /// Safety: non null. A null-terminated string.
-    path: NonNull<c_char>,
+    pub path: NonNull<c_char>,
     // partitions: HashMap<String, String>
-    size: u64,
-    modification_time: i64,
-    data_change: bool,
+    pub size: u64,
+    pub modification_time: i64,
+    pub data_change: bool,
     // stats: { num_records: i64 }
     /// Safety: nullable.
-    deletion_vector: Option<NonNull<DeletionVectorDescriptor>>,
+    pub deletion_vector: Option<NonNull<DeletionVectorDescriptor>>,
 }
 
 /// Deletion vector descriptor. The same as [`DeletionVectorDescriptor`] in kernel.
@@ -41,13 +40,13 @@ pub struct AddFileActionMetadata {
 #[repr(C)]
 pub struct DeletionVectorDescriptor {
     /// A single character to indicate how to access the DV. Legal options are: ['u', 'i', 'p'].
-    storage_type: c_char,
+    pub storage_type: c_char,
     /// Safety: non null. A null-terminated string.
-    path_or_inline_dv: NonNull<c_char>,
+    pub path_or_inline_dv: NonNull<c_char>,
     /// Safety: nullable. If null, the offset is 0.
-    offset: Option<NonNull<i32>>,
-    size_in_bytes: i32,
-    cardinality: i64,
+    pub offset: Option<NonNull<i32>>,
+    pub size_in_bytes: i32,
+    pub cardinality: i64,
 }
 
 /// Metadata for a single `remove` action exposed via the simple C FFI.
@@ -147,41 +146,50 @@ impl AddFileActionMetadata {
             1,
         )?);
 
-        let (arrays, nulls): (Vec<ArrayRef>, Option<NullBuffer>) =
-            if let Some(desc) = self.deletion_vector {
-                let dv = unsafe { desc.read() };
-                (
-                    vec![
-                        Arc::new(StringArray::from(vec![dv.storage_type.to_string()])),
-                        Arc::new(StringArray::from(vec![unsafe {
-                            cloned_c_str(dv.path_or_inline_dv.as_ptr())?
-                        }])),
-                        Arc::new(Int32Array::from(vec![dv
-                            .offset
-                            .map(|v| unsafe { v.read() })
-                            .unwrap_or(0)])),
-                        Arc::new(Int32Array::from(vec![dv.size_in_bytes])),
-                        Arc::new(Int64Array::from(vec![dv.cardinality])),
-                    ],
-                    None,
-                )
-            } else {
-                (vec![], Some(NullBuffer::new(BooleanBuffer::new_unset(1))))
-            };
+        let deletion_vector = if let Some(desc) = self.deletion_vector {
+            let dv = unsafe { desc.read() };
+            let arrays: Vec<ArrayRef> = vec![
+                Arc::new(StringArray::from(vec![
+                    (dv.storage_type as u8 as char).to_string()
+                ])),
+                Arc::new(StringArray::from(vec![unsafe {
+                    cloned_c_str(dv.path_or_inline_dv.as_ptr())?
+                }])),
+                Arc::new(Int32Array::from(vec![dv
+                    .offset
+                    .map(|v| unsafe { v.read() })
+                    .unwrap_or(0)])),
+                Arc::new(Int32Array::from(vec![dv.size_in_bytes])),
+                Arc::new(Int64Array::from(vec![dv.cardinality])),
+            ];
 
-        let deletion_vector = Arc::new(StructArray::try_new_with_length(
-            vec![
-                Field::new("storageType", DataType::Utf8, true),
-                Field::new("pathOrInlineDv", DataType::Utf8, true),
-                Field::new("offset", DataType::Int32, true),
-                Field::new("sizeInBytes", DataType::Int32, true),
-                Field::new("cardinality", DataType::Int64, true),
-            ]
-            .into(),
-            arrays,
-            nulls,
-            1,
-        )?);
+            Arc::new(StructArray::try_new_with_length(
+                vec![
+                    Field::new("storageType", DataType::Utf8, false),
+                    Field::new("pathOrInlineDv", DataType::Utf8, false),
+                    Field::new("offset", DataType::Int32, true),
+                    Field::new("sizeInBytes", DataType::Int32, false),
+                    Field::new("cardinality", DataType::Int64, false),
+                ]
+                .into(),
+                arrays,
+                None,
+                1,
+            )?)
+        } else {
+            // Create the deletion vector struct array (null)
+            Arc::new(StructArray::new_null(
+                vec![
+                    Field::new("storageType", DataType::Utf8, false),
+                    Field::new("pathOrInlineDv", DataType::Utf8, false),
+                    Field::new("offset", DataType::Int32, true),
+                    Field::new("sizeInBytes", DataType::Int32, false),
+                    Field::new("cardinality", DataType::Int64, false),
+                ]
+                .into(),
+                1,
+            ))
+        };
 
         Ok(Box::new(ArrowEngineData::new(RecordBatch::try_new(
             Arc::new(add_files_schema().as_ref().try_into_arrow()?),
