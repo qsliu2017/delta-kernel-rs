@@ -434,6 +434,19 @@ pub unsafe extern "C" fn dv_uuid(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn dv_path_or_inline_dv(
+    dv_info: &DvInfo,
+    engine: Handle<SharedExternEngine>,
+    allocate_fn: AllocateStringFn,
+) -> ExternResult<NullableCvoid> {
+    let v = dv_info.dv_path_or_inline_dv();
+    let opt = v
+        .as_ref()
+        .and_then(|s| allocate_fn(kernel_string_slice!(s)).as_ref().cloned());
+    Ok(opt).into_extern_result(&engine.as_ref())
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn dv_offset(
     dv_info: &DvInfo,
     engine: Handle<SharedExternEngine>,

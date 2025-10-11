@@ -95,6 +95,12 @@ impl DvInfo {
         self.deletion_vector.as_ref().map(|d| d.unique_id())
     }
 
+    pub fn dv_path_or_inline_dv(&self) -> Option<String> {
+        self.deletion_vector
+            .as_ref()
+            .map(|d| d.path_or_inline_dv.clone())
+    }
+
     pub fn dv_offset(&self) -> Option<u64> {
         self.deletion_vector
             .as_ref()
@@ -102,7 +108,9 @@ impl DvInfo {
     }
 
     pub fn dv_size_in_bytes(&self) -> Option<u64> {
-        self.deletion_vector.as_ref().map(|d| d.size_in_bytes as u64)
+        self.deletion_vector
+            .as_ref()
+            .map(|d| d.size_in_bytes as u64)
     }
 
     pub fn dv_cardinality(&self) -> Option<u64> {
