@@ -36,7 +36,7 @@ pub struct AddFileActionMetadata {
     pub size: u64,
     pub modification_time: i64,
     pub data_change: bool,
-    // stats: { num_records: i64 }
+    pub num_records: i64,
     /// Safety: nullable.
     pub deletion_vector: Option<NonNull<DeletionVectorDescriptor>>,
 }
@@ -568,7 +568,7 @@ impl AddFileActionMetadata {
 
         let stats = Arc::new(StructArray::try_new_with_length(
             vec![Field::new("numRecords", DataType::Int64, true)].into(),
-            vec![Arc::new(Int64Array::from(vec![0 as i64]))],
+            vec![Arc::new(Int64Array::from(vec![self.num_records]))],
             None,
             1,
         )?);
